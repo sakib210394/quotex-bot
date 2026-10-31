@@ -1,4 +1,6 @@
-import asyncio, json, ssl, websockets
+import asyncio, json, ssl
+import urllib.request
+import websockets
 
 COOKIE = "lang=en; __vid1=09697a9396c74d06016039b91a745b09; activeAccount=demo; _ga=GA1.1.396201687.1791633171"
 
@@ -18,30 +20,37 @@ class QuotexAPI:
         ssl_ctx = ssl.create_default_context()
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = ssl.CERT_NONE
-        headers = {
-            "Cookie": COOKIE,
-            "Origin": "https://market-qx.info",
-            "User-Agent": "Mozilla/5.0 Chrome/120"
-        }
+
         urls = [
             "wss://ws2.market-qx.info/socket.io/?EIO=3&transport=websocket",
             "wss://ws2.quotex.io/socket.io/?EIO=3&transport=websocket",
         ]
+
+        extra = {
+            "Cookie": COOKIE,
+            "Origin": "https://market-qx.info",
+            "User-Agent": "Mozilla/5.0 Chrome/120"
+        }
+
         for url in urls:
             try:
                 print(f"Trying: {url}")
                 async with websockets.connect(
-                    url, additional_headers=headers,
-                    ssl=ssl_ctx, open_timeout=20
+                    url,
+                    extra_headers=extra,
+                    ssl=ssl_ctx,
+                    open_timeout=20
                 ) as ws:
-                    print(f"Connected!")
+                    print("Connected!")
                     await ws.recv()
                     await ws.recv()
                     await ws.send('42["instruments/update",{"asset":"USDBDT_otc","period":60}]')
                     await asyncio.sleep(1)
                     await ws.send('42["candles/subscribe",{"asset":"USDBDT_otc","period":60,"offset":4800}]')
                     async for msg in ws:
-                        if msg in ("2","3"): await ws.send("3"); continue
+                        if msg in ("2","3"):
+                            await ws.send("3")
+                            continue
                         self._parse(msg)
             except Exception as e:
                 print(f"Failed: {e}")
