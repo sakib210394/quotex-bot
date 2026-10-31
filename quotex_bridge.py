@@ -1,8 +1,8 @@
 import asyncio, json, os, ssl, websockets
 from playwright.async_api import async_playwright
 
-EMAIL = os.environ.get("QUOTEX_EMAIL "sakibarham17yahoo.com")
-PASSWORD = os.environ.get("QUOTEX_PASSWORD", "@Sakib1234")
+EMAIL = os.environ.get("QUOTEX_EMAIL", "")
+PASSWORD = os.environ.get("QUOTEX_PASSWORD", "")
 SESSION_FILE = "session.json"
 
 async def get_session():
