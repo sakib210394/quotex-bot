@@ -48,8 +48,8 @@ class QuotexAPI:
             "User-Agent": "Mozilla/5.0 Chrome/120"
         }
         url = "wss://ws2.qxbroker.com/socket.io/?EIO=3&transport=websocket"
-        async with websockets.connect(url, additional_headers=headers,
-                ssl=ssl_ctx, open_timeout=20) as ws:
+        async with websockets.connect(url, extra_headers=headers,
+        ssl=ssl_ctx, open_timeout=20) as ws:
             self.ws = ws
             await ws.recv(); await ws.recv()
             await ws.send('42["instruments/update",{"asset":"USDBDT_otc","period":60}]')
