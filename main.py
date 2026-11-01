@@ -1,5 +1,5 @@
 import asyncio, math, threading
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from quotex_bridge import api
 
 app = FastAPI()
@@ -63,3 +63,11 @@ def candles(): return {"count":len(api.candles),"data":api.candles[-10:]}
 @app.on_event("startup")
 async def startup():
     asyncio.create_task(api.start())
+from fastapi import Request
+
+@app.post("/inject")
+async def inject(request: Request):
+    body = await request.json()
+    msg = body.get("data", "")
+    api._parse(msg)
+    return {"ok": True, "candles": len(api.candles)}
