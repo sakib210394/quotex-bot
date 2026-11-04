@@ -1,59 +1,135 @@
-import asyncio, json, ssl
-import urllib.request
-import websockets
+import asyncio, json, os, ssl, websockets, logging
+from playwright.async_api import async_playwright
 
-COOKIE = "lang=en; _ga=GA1.1.396201687.1791633171; OTCTooltip={%22value%22:false}; balance-visible={%22value%22:true}; nas=[%22USDBDT_otc%22%2C%22EURUSD_otc%22%2C%22EURNZD_otc%22%2C%22EURUSD%22%2C%22AUDUSD%22%2C%22EURJPY%22%2C%22USDJPY%22%2C%22EURGBP%22%2C%22AUDJPY%22%2C%22GBPUSD%22%2C%22NZDUSD_otc%22%2C%22GBPJPY%22%2C%22USDCAD%22%2C%22USDCHF%22%2C%22GBPCAD%22%2C%22XAGUSD_otc%22%2C%22USDIDR_otc%22%2C%22USDJPY_otc%22%2C%22NZDCHF_otc%22%2C%22EURAUD_otc%22%2C%22USDEGP_otc%22%2C%22EURCHF%22%2C%22USDZAR_otc%22%2C%22BTCUSD_otc%22%2C%22AUDCAD%22%2C%22AVAUSD_otc%22%2C%22CADCHF_otc%22%2C%22GBPJPY_otc%22%2C%22GBPCHF_otc%22%2C%22EURCHF_otc%22%2C%22EURJPY_otc%22%2C%22BRLUSD_otc%22%2C%22USDINR_otc%22]; __vid1=09697a9396c74d06016039b91a745b09; _ga_L4T5GBPFHJ=GS2.1.s1793439122$o55$g0$t1793439122$j60$l0$h0; activeAccount=demo; z=[[%22graph%22%2C2%2C1%2C-0.4%2C0.2075]%2C[%22graph%22%2C3%2C11%2C-1.7%2C0.2075]%2C[%22graph%22%2C4%2C19%2C-4.9%2C2.1156]%2C[%22graph%22%2C5%2C14%2C-2.9%2C0.2075]]"
+EMAIL = os.environ.get("QUOTEX_EMAIL", "")
+PASSWORD = os.environ.get("QUOTEX_PASSWORD", "")
+ASSET = "USDBDT_otc"
+SESSION_FILE = "/tmp/qx_session.json"
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
 
 class QuotexAPI:
     def __init__(self):
         self.candles = []
+        self.session = None
+        self.running = False
 
-    async def start(self):
-        while True:
-            try:
-                await self.connect_ws()
-            except Exception as e:
-                print(f"WS error: {e}")
-                await asyncio.sleep(5)
+    async def get_session_playwright(self):
+        log.info("🌐 Playwright login starting...")
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=['--no-sandbox','--disable-setuid-sandbox',
+                      '--disable-dev-shm-usage','--disable-gpu']
+            )
+            ctx = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120"
+            )
+            page = await ctx.new_page()
+            
+            for host in ["qxbroker.com","quotex.io","market-qx.info"]:
+                try:
+                    log.info(f"Trying {host}...")
+                    await page.goto(f"https://{host}/en/sign-in", timeout=30000)
+                    await page.wait_for_timeout(2000)
+                    
+                    # Login
+                    await page.fill('input[type="email"]', EMAIL)
+                    await page.fill('input[type="password"]', PASSWORD)
+                    await page.click('button[type="submit"]')
+                    await page.wait_for_timeout(5000)
+                    
+                    # Cookies নাও
+                    cookies = await ctx.cookies()
+                    if cookies:
+                        cookie_str = "; ".join(
+                            f"{c['name']}={c['value']}" for c in cookies
+                        )
+                        ssid = next(
+                            (c['value'] for c in cookies 
+                             if c['name'] in ['token','ssid','session','auth']),
+                            None
+                        )
+                        session = {
+                            "cookies": cookie_str,
+                            "ssid": ssid,
+                            "host": host
+                        }
+                        with open(SESSION_FILE, "w") as f:
+                            json.dump(session, f)
+                        log.info(f"✅ Session saved! SSID: {ssid}")
+                        await browser.close()
+                        return session
+                except Exception as e:
+                    log.error(f"✗ {host}: {e}")
+                    continue
+            
+            await browser.close()
+            return None
+
+    async def load_or_create_session(self):
+        if os.path.exists(SESSION_FILE):
+            with open(SESSION_FILE) as f:
+                self.session = json.load(f)
+                log.info(f"Session loaded from file")
+                return True
+        
+        self.session = await self.get_session_playwright()
+        return self.session is not None
 
     async def connect_ws(self):
+        if not self.session:
+            return
+            
         ssl_ctx = ssl.create_default_context()
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = ssl.CERT_NONE
-
-        urls = [
-            "wss://ws2.market-qx.info/socket.io/?EIO=3&transport=websocket",
-            "wss://ws2.quotex.io/socket.io/?EIO=3&transport=websocket",
+        
+        host = self.session.get("host", "qxbroker.com")
+        cookie = self.session.get("cookies", "")
+        
+        ws_urls = [
+            f"wss://ws2.{host}/socket.io/?EIO=3&transport=websocket",
+            f"wss://ws2.quotex.io/socket.io/?EIO=3&transport=websocket",
+            f"wss://ws2.market-qx.info/socket.io/?EIO=3&transport=websocket",
         ]
-
-        extra = {
-            "Cookie": COOKIE,
-            "Origin": "https://market-qx.info",
-            "User-Agent": "Mozilla/5.0 Chrome/120"
-        }
-
-        for url in urls:
+        
+        for url in ws_urls:
             try:
-                print(f"Trying: {url}")
+                log.info(f"WS trying: {url}")
+                headers = {
+                    "Cookie": cookie,
+                    "Origin": f"https://{host}",
+                    "User-Agent": "Mozilla/5.0 Chrome/120"
+                }
                 async with websockets.connect(
-                    url,
-                    extra_headers=extra,
-                    ssl=ssl_ctx,
-                    open_timeout=20
+                    url, extra_headers=headers,
+                    ssl=ssl_ctx, open_timeout=20
                 ) as ws:
-                    print("Connected!")
-                    await ws.recv()
-                    await ws.recv()
-                    await ws.send('42["instruments/update",{"asset":"USDBDT_otc","period":60}]')
+                    log.info(f"✅ WS Connected: {url}")
+                    await ws.recv()  # handshake
+                    await ws.recv()  # connected
+                    
+                    # Subscribe candles
+                    await ws.send(
+                        f'42["instruments/update",{{"asset":"{ASSET}","period":60}}]'
+                    )
                     await asyncio.sleep(1)
-                    await ws.send('42["candles/subscribe",{"asset":"USDBDT_otc","period":60,"offset":4800}]')
+                    await ws.send(
+                        f'42["candles/subscribe",{{"asset":"{ASSET}","period":60,"offset":4800}}]'
+                    )
+                    
+                    log.info("📡 Listening for candles...")
                     async for msg in ws:
                         if msg in ("2","3"):
                             await ws.send("3")
                             continue
                         self._parse(msg)
+                        
             except Exception as e:
-                print(f"Failed: {e}")
+                log.error(f"WS failed {url}: {e}")
+                continue
 
     def _parse(self, msg):
         try:
@@ -64,10 +140,28 @@ class QuotexAPI:
                 raw = pl.get("data", [])
                 for c in raw: self.candles.append(c)
                 self.candles = self.candles[-100:]
-                print(f"Candles: {len(self.candles)}")
+                log.info(f"✅ Candles: {len(self.candles)}")
             elif "generated" in ev:
                 self.candles.append(pl)
                 self.candles = self.candles[-100:]
+                log.info(f"New candle: price={pl.get('close','?')}")
         except: pass
+
+    async def start(self):
+        while True:
+            try:
+                ok = await self.load_or_create_session()
+                if not ok:
+                    log.error("Session failed, retry in 30s")
+                    await asyncio.sleep(30)
+                    continue
+                await self.connect_ws()
+            except Exception as e:
+                log.error(f"Error: {e}")
+            log.info("Reconnecting in 10s...")
+            await asyncio.sleep(10)
+            # Session refresh
+            if os.path.exists(SESSION_FILE):
+                os.remove(SESSION_FILE)
 
 api = QuotexAPI()
