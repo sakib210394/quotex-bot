@@ -1,167 +1,94 @@
-import asyncio, json, os, ssl, websockets, logging
-from playwright.async_api import async_playwright
-
-EMAIL = os.environ.get("QUOTEX_EMAIL", "")
-PASSWORD = os.environ.get("QUOTEX_PASSWORD", "")
-ASSET = "USDBDT_otc"
-SESSION_FILE = "/tmp/qx_session.json"
+import asyncio, json, ssl, random, string
+import websockets
+import logging
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
+SYMBOL = "FX_IDC:USDBDT"
+
 class QuotexAPI:
     def __init__(self):
         self.candles = []
-        self.session = None
-        self.running = False
-
-    async def get_session_playwright(self):
-        log.info("🌐 Playwright login starting...")
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=['--no-sandbox','--disable-setuid-sandbox',
-                      '--disable-dev-shm-usage','--disable-gpu']
-            )
-            ctx = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120"
-            )
-            page = await ctx.new_page()
-            
-            for host in ["qxbroker.com","quotex.io","market-qx.info"]:
-                try:
-                    log.info(f"Trying {host}...")
-                    await page.goto(f"https://{host}/en/sign-in", timeout=30000)
-                    await page.wait_for_timeout(2000)
-                    
-                    # Login
-                    await page.fill('input[type="email"]', EMAIL)
-                    await page.fill('input[type="password"]', PASSWORD)
-                    await page.click('button[type="submit"]')
-                    await page.wait_for_timeout(5000)
-                    
-                    # Cookies নাও
-                    cookies = await ctx.cookies()
-                    if cookies:
-                        cookie_str = "; ".join(
-                            f"{c['name']}={c['value']}" for c in cookies
-                        )
-                        ssid = next(
-                            (c['value'] for c in cookies 
-                             if c['name'] in ['token','ssid','session','auth']),
-                            None
-                        )
-                        session = {
-                            "cookies": cookie_str,
-                            "ssid": ssid,
-                            "host": host
-                        }
-                        with open(SESSION_FILE, "w") as f:
-                            json.dump(session, f)
-                        log.info(f"✅ Session saved! SSID: {ssid}")
-                        await browser.close()
-                        return session
-                except Exception as e:
-                    log.error(f"✗ {host}: {e}")
-                    continue
-            
-            await browser.close()
-            return None
-
-    async def load_or_create_session(self):
-        if os.path.exists(SESSION_FILE):
-            with open(SESSION_FILE) as f:
-                self.session = json.load(f)
-                log.info(f"Session loaded from file")
-                return True
-        
-        self.session = await self.get_session_playwright()
-        return self.session is not None
-
-    async def connect_ws(self):
-        if not self.session:
-            return
-            
-        ssl_ctx = ssl.create_default_context()
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
-        
-        host = self.session.get("host", "qxbroker.com")
-        cookie = self.session.get("cookies", "")
-        
-        ws_urls = [
-            f"wss://ws2.{host}/socket.io/?EIO=3&transport=websocket",
-            f"wss://ws2.quotex.io/socket.io/?EIO=3&transport=websocket",
-            f"wss://ws2.market-qx.info/socket.io/?EIO=3&transport=websocket",
-        ]
-        
-        for url in ws_urls:
-            try:
-                log.info(f"WS trying: {url}")
-                headers = {
-                    "Cookie": cookie,
-                    "Origin": f"https://{host}",
-                    "User-Agent": "Mozilla/5.0 Chrome/120"
-                }
-                async with websockets.connect(
-                    url, extra_headers=headers,
-                    ssl=ssl_ctx, open_timeout=20
-                ) as ws:
-                    log.info(f"✅ WS Connected: {url}")
-                    await ws.recv()  # handshake
-                    await ws.recv()  # connected
-                    
-                    # Subscribe candles
-                    await ws.send(
-                        f'42["instruments/update",{{"asset":"{ASSET}","period":60}}]'
-                    )
-                    await asyncio.sleep(1)
-                    await ws.send(
-                        f'42["candles/subscribe",{{"asset":"{ASSET}","period":60,"offset":4800}}]'
-                    )
-                    
-                    log.info("📡 Listening for candles...")
-                    async for msg in ws:
-                        if msg in ("2","3"):
-                            await ws.send("3")
-                            continue
-                        self._parse(msg)
-                        
-            except Exception as e:
-                log.error(f"WS failed {url}: {e}")
-                continue
-
-    def _parse(self, msg):
-        try:
-            if not msg.startswith("42"): return
-            data = json.loads(msg[2:])
-            ev = data[0]; pl = data[1] if len(data)>1 else {}
-            if "candles" in ev:
-                raw = pl.get("data", [])
-                for c in raw: self.candles.append(c)
-                self.candles = self.candles[-100:]
-                log.info(f"✅ Candles: {len(self.candles)}")
-            elif "generated" in ev:
-                self.candles.append(pl)
-                self.candles = self.candles[-100:]
-                log.info(f"New candle: price={pl.get('close','?')}")
-        except: pass
 
     async def start(self):
         while True:
             try:
-                ok = await self.load_or_create_session()
-                if not ok:
-                    log.error("Session failed, retry in 30s")
-                    await asyncio.sleep(30)
-                    continue
-                await self.connect_ws()
+                await self.connect_tv()
             except Exception as e:
                 log.error(f"Error: {e}")
-            log.info("Reconnecting in 10s...")
-            await asyncio.sleep(10)
-            # Session refresh
-            if os.path.exists(SESSION_FILE):
-                os.remove(SESSION_FILE)
+            log.info("Reconnecting in 5s...")
+            await asyncio.sleep(5)
+
+    async def connect_tv(self):
+        url = "wss://data.tradingview.com/socket.io/websocket"
+        headers = {
+            "Origin": "https://www.tradingview.com",
+            "User-Agent": "Mozilla/5.0 Chrome/120"
+        }
+        ssl_ctx = ssl.create_default_context()
+
+        log.info("Connecting TradingView...")
+        async with websockets.connect(
+            url, extra_headers=headers,
+            ssl=ssl_ctx, open_timeout=20
+        ) as ws:
+            log.info("✅ TradingView Connected!")
+
+            sid = ''.join(random.choices(string.ascii_lowercase, k=12))
+            csid = ''.join(random.choices(string.ascii_lowercase, k=12))
+
+            def tv_msg(func, *args):
+                d = json.dumps({"m": func, "p": list(args)})
+                return f"~m~{len(d)}~m~{d}"
+
+            await ws.send(tv_msg("set_auth_token", "unauthorized_user_token"))
+            await ws.send(tv_msg("chart_create_session", csid, ""))
+            await ws.send(tv_msg("quote_create_session", sid))
+            await ws.send(tv_msg("quote_add_symbols", sid, SYMBOL))
+            await ws.send(tv_msg("resolve_symbol", csid, "sds_1",
+                f'={{"symbol":"{SYMBOL}","adjustment":"splits"}}'))
+            await ws.send(tv_msg("create_series", csid, "s1", "sds_1", "sds_1", "1", 300))
+
+            log.info("📡 Waiting for candle data...")
+
+            async for raw in ws:
+                try:
+                    parts = raw.split("~m~")
+                    for part in parts:
+                        if not part or not part.startswith("{"): continue
+                        data = json.loads(part)
+                        m = data.get("m", "")
+                        p = data.get("p", [])
+
+                        if m == "timescale_update" and len(p) > 1:
+                            series = p[1]
+                            bars = series.get("s1", {}).get("s", [])
+                            for bar in bars:
+                                v = bar.get("v", [])
+                                if len(v) >= 5:
+                                    self.candles.append({
+                                        "time":  int(v[0]),
+                                        "open":  float(v[1]),
+                                        "high":  float(v[2]),
+                                        "low":   float(v[3]),
+                                        "close": float(v[4]),
+                                    })
+                            self.candles = self.candles[-100:]
+                            if self.candles:
+                                log.info(f"✅ {len(self.candles)} candles! Price: {self.candles[-1]['close']}")
+
+                        elif m == "du" and len(p) > 1:
+                            qt = p[1]
+                            lp = qt.get(SYMBOL, {}).get("lp") or qt.get("lp")
+                            if lp and self.candles:
+                                self.candles[-1]["close"] = float(lp)
+                                log.info(f"Price: {lp}")
+
+                except Exception as e:
+                    continue
+
+    def _parse(self, msg):
+        pass
 
 api = QuotexAPI()
