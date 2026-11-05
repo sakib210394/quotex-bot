@@ -5,7 +5,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-SYMBOL = "FX_IDC:USDBDT"
+SYMBOL = "FX_IDC:USDINR"
 
 class QuotexAPI:
     def __init__(self):
