@@ -114,3 +114,17 @@ async def inject(request: Request):
 @app.on_event("startup")
 async def startup():
     asyncio.create_task(api.start())
+@app.get("/best-signal")
+def best_signal():
+    results = []
+    for sym, candles in api.market_candles.items():
+        if len(candles) >= 15:
+            res = analyze(candles)
+            res["market"] = sym.replace("FX_IDC:","").replace("FX:","")
+            res["symbol"] = sym
+            results.append(res)
+    if not results:
+        return {"error":"No data yet","candles":len(api.candles)}
+    best = max(results, key=lambda x: x.get("confidence",0))
+    summary = sorted(results, key=lambda x: x.get("confidence",0), reverse=True)
+    return {"best":best, "all_markets":summary}
