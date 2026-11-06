@@ -1,15 +1,24 @@
-import asyncio, json, ssl, random, string
+import asyncio, json, ssl, random, string, logging
 import websockets
-import logging
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-SYMBOL = "FX_IDC:USDJPY"
+SYMBOLS = [
+    "FX_IDC:USDBDT",
+    "FX:EURUSD",
+    "FX:GBPUSD",
+    "FX:USDJPY",
+    "FX:USDCAD",
+    "FX:AUDUSD",
+    "FX:EURJPY",
+    "FX:GBPJPY",
+]
 
 class QuotexAPI:
     def __init__(self):
         self.candles = []
+        self.market_candles = {s: [] for s in SYMBOLS}
 
     async def start(self):
         while True:
@@ -17,7 +26,6 @@ class QuotexAPI:
                 await self.connect_tv()
             except Exception as e:
                 log.error(f"Error: {e}")
-            log.info("Reconnecting in 5s...")
             await asyncio.sleep(5)
 
     async def connect_tv(self):
@@ -28,29 +36,34 @@ class QuotexAPI:
         }
         ssl_ctx = ssl.create_default_context()
 
-        log.info("Connecting TradingView...")
+        log.info("Connecting TradingView multi-market...")
         async with websockets.connect(
             url, extra_headers=headers,
             ssl=ssl_ctx, open_timeout=20
         ) as ws:
-            log.info("✅ TradingView Connected!")
+            log.info("✅ Connected!")
 
-            sid = ''.join(random.choices(string.ascii_lowercase, k=12))
             csid = ''.join(random.choices(string.ascii_lowercase, k=12))
+            qsid = ''.join(random.choices(string.ascii_lowercase, k=12))
 
-            def tv_msg(func, *args):
+            def tv(func, *args):
                 d = json.dumps({"m": func, "p": list(args)})
                 return f"~m~{len(d)}~m~{d}"
 
-            await ws.send(tv_msg("set_auth_token", "unauthorized_user_token"))
-            await ws.send(tv_msg("chart_create_session", csid, ""))
-            await ws.send(tv_msg("quote_create_session", sid))
-            await ws.send(tv_msg("quote_add_symbols", sid, SYMBOL))
-            await ws.send(tv_msg("resolve_symbol", csid, "sds_1",
-                f'={{"symbol":"{SYMBOL}","adjustment":"splits"}}'))
-            await ws.send(tv_msg("create_series", csid, "s1", "sds_1", "sds_1", "1", 300))
+            await ws.send(tv("set_auth_token", "unauthorized_user_token"))
+            await ws.send(tv("chart_create_session", csid, ""))
+            await ws.send(tv("quote_create_session", qsid))
 
-            log.info("📡 Waiting for candle data...")
+            # সব symbol subscribe করো
+            for i, sym in enumerate(SYMBOLS):
+                sid = f"s{i+1}"
+                await ws.send(tv("resolve_symbol", csid, f"sym_{i}",
+                    f'={{"symbol":"{sym}","adjustment":"splits"}}'))
+                await ws.send(tv("create_series", csid, sid,
+                    f"sym_{i}", f"sym_{i}", "1", 100))
+                await ws.send(tv("quote_add_symbols", qsid, sym))
+
+            log.info(f"📡 Watching {len(SYMBOLS)} markets...")
 
             async for raw in ws:
                 try:
@@ -62,33 +75,39 @@ class QuotexAPI:
                         p = data.get("p", [])
 
                         if m == "timescale_update" and len(p) > 1:
-                            series = p[1]
-                            bars = series.get("s1", {}).get("s", [])
-                            for bar in bars:
-                                v = bar.get("v", [])
-                                if len(v) >= 5:
-                                    self.candles.append({
-                                        "time":  int(v[0]),
-                                        "open":  float(v[1]),
-                                        "high":  float(v[2]),
-                                        "low":   float(v[3]),
-                                        "close": float(v[4]),
-                                    })
-                            self.candles = self.candles[-100:]
-                            if self.candles:
-                                log.info(f"✅ {len(self.candles)} candles! Price: {self.candles[-1]['close']}")
+                            series_data = p[1]
+                            for i, sym in enumerate(SYMBOLS):
+                                sid = f"s{i+1}"
+                                bars = series_data.get(sid, {}).get("s", [])
+                                if bars:
+                                    for bar in bars:
+                                        v = bar.get("v", [])
+                                        if len(v) >= 5:
+                                            self.market_candles[sym].append({
+                                                "time":  int(v[0]),
+                                                "open":  float(v[1]),
+                                                "high":  float(v[2]),
+                                                "low":   float(v[3]),
+                                                "close": float(v[4]),
+                                            })
+                                    self.market_candles[sym] = self.market_candles[sym][-100:]
+                                    log.info(f"✅ {sym}: {len(self.market_candles[sym])} candles")
 
+                        # Live price
                         elif m == "du" and len(p) > 1:
                             qt = p[1]
-                            lp = qt.get(SYMBOL, {}).get("lp") or qt.get("lp")
-                            if lp and self.candles:
-                                self.candles[-1]["close"] = float(lp)
-                                log.info(f"Price: {lp}")
+                            for sym in SYMBOLS:
+                                lp = qt.get(sym, {}).get("lp")
+                                if lp and self.market_candles[sym]:
+                                    self.market_candles[sym][-1]["close"] = float(lp)
 
-                except Exception as e:
+                        # Default candles (USDBDT)
+                        if self.market_candles.get("FX_IDC:USDBDT"):
+                            self.candles = self.market_candles["FX_IDC:USDBDT"]
+
+                except Exception:
                     continue
 
-    def _parse(self, msg):
-        pass
+    def _parse(self, msg): pass
 
 api = QuotexAPI()
